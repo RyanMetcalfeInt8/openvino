@@ -72,6 +72,15 @@ std::string ModelCache::compute_hash(const std::shared_ptr<const ov::Model>& mod
     for (const auto& op : model->get_ordered_ops()) {
         const auto& rt = op->get_rt_info();
         for (const auto& rtMapData : rt) {
+            // "fused_names" RT info can have non-deterministic 'values', so
+            // skip calculating hash for these.
+            if (rtMapData.second.is<ov::RuntimeAttribute>()) {
+                auto& rt_attribute = rtMapData.second.as<ov::RuntimeAttribute>();
+                const auto& type_info = rt_attribute.get_type_info();
+                if (std::string(type_info.name) == "fused_names") {
+                    continue;
+                }
+            }
             seed = hash_combine(seed, rtMapData.first);
             std::stringstream strm;
             rtMapData.second.print(strm);

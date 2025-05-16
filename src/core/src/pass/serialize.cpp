@@ -1072,7 +1072,7 @@ void ngfunction_2_ir(pugi::xml_node& netXml,
         // <layers/data> general attributes
         pugi::xml_node data = layer.append_child("data");
 
-        auto append_runtime_info = [](pugi::xml_node& node, ov::RTMap& attributes) {
+        auto append_runtime_info = [](pugi::xml_node& node, ov::RTMap& attributes, bool deterministic) {
             pugi::xml_node rt_node = node.append_child("rt_info");
             bool has_attrs = false;
             for (auto& item : attributes) {
@@ -1082,11 +1082,15 @@ void ngfunction_2_ir(pugi::xml_node& netXml,
                     const auto& type_info = rt_attribute.get_type_info();
                     attribute_node.append_attribute("name").set_value(type_info.name);
                     attribute_node.append_attribute("version").set_value(type_info.get_version().c_str());
-                    rt_info::RTInfoSerializer serializer(attribute_node);
-                    if (!rt_attribute.visit_attributes(serializer)) {
-                        rt_node.remove_child(attribute_node);
-                    } else {
-                        has_attrs = true;
+                    //"fused_names" attribute can have non-deterministic value, so skip these when
+                    // in deterministic mode.
+                    if (!deterministic || std::string(type_info.name) != "fused_names") {
+                        rt_info::RTInfoSerializer serializer(attribute_node);
+                        if (!rt_attribute.visit_attributes(serializer)) {
+                            rt_node.remove_child(attribute_node);
+                        } else {
+                            has_attrs = true;
+                        }
                     }
                 }
             }
@@ -1096,7 +1100,7 @@ void ngfunction_2_ir(pugi::xml_node& netXml,
         };
 
         if (version >= 11) {
-            append_runtime_info(layer, node->get_rt_info());
+            append_runtime_info(layer, node->get_rt_info(), deterministic);
         }
 
         int port_id = 0;
@@ -1128,7 +1132,7 @@ void ngfunction_2_ir(pugi::xml_node& netXml,
                     }
                 }
                 if (version >= 11)
-                    append_runtime_info(port, i.get_rt_info());
+                    append_runtime_info(port, i.get_rt_info(), deterministic);
             }
 
             if (node_type_name == "TensorIterator" || node_type_name == "Loop") {
@@ -1185,7 +1189,7 @@ void ngfunction_2_ir(pugi::xml_node& netXml,
                         }
                     }
                     if (version >= 11)
-                        append_runtime_info(port, o.get_rt_info());
+                        append_runtime_info(port, o.get_rt_info(), deterministic);
                 }
                 if (node_type_name == "TensorIterator" || node_type_name == "Loop") {
                     layer.insert_move_after(output, layer.first_child());

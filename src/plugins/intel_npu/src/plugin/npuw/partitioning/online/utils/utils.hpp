@@ -69,7 +69,6 @@ using Pass = std::function<void(void)>;
 namespace util {
 // FIXME: metadesc should be hash of layer's meta, not string
 std::string getMetaDesc(const std::shared_ptr<ov::Node>& ov_node);
-std::string repeated_id(const std::shared_ptr<Repeated>& ptr);
 std::optional<Avoid> parseAvoid(const std::string& s);
 std::optional<Isolate> parseIsolate(const std::string& s);
 std::tuple<PatternType, std::string, std::string> parse(const std::string& s);

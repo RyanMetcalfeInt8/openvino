@@ -181,6 +181,7 @@ ov::npuw::LLMInferRequest::LLMInferRequest(const std::shared_ptr<ov::npuw::LLMCo
         m_lm_head_request = compiled_model->m_lm_head_compiled->create_infer_request();
         OPENVINO_ASSERT(m_lm_head_request);
         const ov::Output<const ov::Node> lm_head_embed_port = m_lm_head_request->get_inputs()[0];
+        m_lm_head_embed_port = lm_head_embed_port;
         m_lm_head_logits_port = m_lm_head_request->get_outputs()[0];
         m_prefill_request->set_tensor(m_prefill_out_ports.at(layer_names::output_embeds),
                                       m_lm_head_request->get_tensor(lm_head_embed_port));
@@ -1292,6 +1293,18 @@ ov::SoPtr<ov::ITensor> ov::npuw::LLMInferRequest::get_tensor(const ov::Output<co
             }
             return last_hidden_state;
         }
+    }
+
+    // Some models (e.g. the Qwen3-TTS talker) surface a "hidden_states" output in addition
+    // to "logits". When the lm_head is cut, the prefill/generate "output_embeds" output is
+    // shared with the lm_head input tensor and holds the last valid token's hidden state
+    // (precisely sliced by SliceOutEmbeds). Expose it for that port.
+    if (m_lm_head_request && port_names.count("hidden_states") > 0) {
+        auto hidden_states = m_lm_head_request->get_tensor(m_lm_head_embed_port);
+        if (!hidden_states) {
+            OPENVINO_THROW("Hidden states tensor is not available. Please run inference first.");
+        }
+        return hidden_states;
     }
 
     return ov::ISyncInferRequest::get_tensor(port);

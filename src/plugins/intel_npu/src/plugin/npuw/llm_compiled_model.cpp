@@ -3,6 +3,9 @@
 //
 #include "llm_compiled_model.hpp"
 
+#include <cstdlib>
+#include <vector>
+
 #include "embedding/embedding_infer_request.hpp"
 #include "embedding/prepare_embedding_model.hpp"
 #include "embedding/redirect_new_kv_to_output.hpp"
@@ -126,9 +129,21 @@ public:
             //        ICompiledModel::ICompiledModel().
             //        As a WA, setting the same name to output from MatMul
             //        avoids the issue.
+            //
+            // NOTE: the cut point (matmul_first_source) is the model's final
+            // hidden-state node. Some models (e.g. the Qwen3-TTS talker) also expose that
+            // same node through a separate Result (its "hidden_states" output). set_names
+            // here overwrites the source's name set, so after the cut BOTH that sibling
+            // Result and matched_result read matmul_first_source and carry the identical
+            // "npuw_output_embed" name. The runtime port maps are unordered_map keyed by
+            // name, so one of the two same-named outputs is silently dropped while the
+            // other ends up dead/disconnected -> the lm_head input gets wired to a
+            // constant output and decode freezes. cut_lm_head() removes that redundant
+            // sibling Result right after this pass so exactly one live output survives.
             matmul_first_source.set_names({ov::npuw::LLMCompiledModel::output_embeds});
             matched_result->output(0).set_names({ov::npuw::LLMCompiledModel::output_embeds});
             matched_result->validate_and_infer_types();
+
 
             // Create an additional model after cut point:
             auto new_param = std::make_shared<ov::op::v0::Parameter>(matmul_first_source.get_element_type(),
@@ -153,6 +168,54 @@ std::shared_ptr<ov::Model> cut_lm_head(const std::shared_ptr<ov::Model>& model) 
     rewr.run_on_model(model);
     if (lm_head_model) {
         lm_head_model->set_friendly_name(model->get_friendly_name() + "_lm_head");
+
+        // After the LM-head cut, the canonical "npuw_output_embed" Result reads the
+        // model's final hidden-state node. If the model also exposed that same node via
+        // a separate Result (e.g. the Qwen3-TTS talker's "hidden_states" output), there
+        // are now two Results sharing one source output, both named "npuw_output_embed".
+        // NPUW would compile these into two same-named outputs, one of which ends up
+        // dead/disconnected; the runtime port map (unordered_map keyed by name) then
+        // wires the lm_head input to the dead output and decode freezes.
+        //
+        // Collapse such duplicates down to the single canonical "npuw_output_embed"
+        // Result. The public talker outputs (logits / hidden_states) are taken from the
+        // ORIGINAL model in ICompiledModel and are served at runtime via the lm_head
+        // request, so the internal generate/prefill model only needs this one embed
+        // output. We deliberately keep ONLY the "npuw_output_embed" name on the survivor
+        // (no name merging) because downstream passes (e.g. SliceOutEmbeds) and the
+        // runtime port maps look the output up via get_any_name(), which would become
+        // ambiguous if extra names were folded in.
+        const std::string embed_name = ov::npuw::LLMCompiledModel::output_embeds;
+        std::shared_ptr<ov::op::v0::Result> canonical_result;
+        for (const auto& result : model->get_results()) {
+            if (result->output(0).get_names().count(embed_name) != 0) {
+                canonical_result = result;
+                break;
+            }
+        }
+        if (canonical_result) {
+            const auto canonical_source = canonical_result->input(0).get_source_output();
+            std::vector<std::shared_ptr<ov::op::v0::Result>> duplicates;
+            for (const auto& result : model->get_results()) {
+                if (result == canonical_result) {
+                    continue;
+                }
+                if (result->input(0).get_source_output() == canonical_source) {
+                    duplicates.push_back(result);
+                }
+            }
+            for (const auto& dup : duplicates) {
+                model->remove_result(dup);
+            }
+            if (!duplicates.empty()) {
+                // Pin the single canonical embed name on both the source output and the
+                // surviving Result so all get_any_name()-based lookups are unambiguous.
+                canonical_source.get_node_shared_ptr()
+                    ->output(canonical_source.get_index())
+                    .set_names({embed_name});
+                canonical_result->output(0).set_names({embed_name});
+            }
+        }
     }
     model->validate_nodes_and_infer_types();
 

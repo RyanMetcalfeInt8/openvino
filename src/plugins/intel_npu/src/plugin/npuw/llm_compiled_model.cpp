@@ -69,6 +69,49 @@ bool is_aligned_to(T value, T alignment) {
     return value % alignment == 0;
 }
 
+bool is_4d_float_attention_mask(const std::shared_ptr<ov::Model>& model) {
+    std::shared_ptr<ov::op::v0::Parameter> attention_mask_param;
+    for (const auto& input : model->inputs()) {
+        const auto& names = input.get_names();
+        if (names.count("attention_mask") || input.get_any_name() == "attention_mask") {
+            attention_mask_param = ov::as_type_ptr<ov::op::v0::Parameter>(input.get_node_shared_ptr());
+            break;
+        }
+    }
+
+    OPENVINO_ASSERT(attention_mask_param,
+                    "NPUW LLM mode expects an input named attention_mask, but no such input was found.");
+
+    const auto elem_type = attention_mask_param->get_element_type();
+    const auto pshape = attention_mask_param->get_partial_shape();
+    const bool is_int_or_bool = elem_type == ov::element::i64 || elem_type == ov::element::i32 ||
+                                elem_type == ov::element::u64 || elem_type == ov::element::u32 ||
+                                elem_type == ov::element::boolean;
+    const bool is_float = elem_type.is_real();
+
+    if (!pshape.rank().is_static()) {
+        OPENVINO_ASSERT(is_int_or_bool,
+                        "NPUW LLM only supports dynamic-rank attention_mask for integer/bool masks. "
+                        "Got floating attention_mask with dynamic rank.");
+        return false;
+    }
+
+    const auto rank = pshape.rank().get_length();
+    if (rank == 2 && is_int_or_bool) {
+        return false;
+    }
+    if (rank == 4 && is_float) {
+        return true;
+    }
+
+    OPENVINO_THROW("Unsupported attention_mask contract for NPUW LLM. Expected either 2D integer/bool "
+                   "attention_mask or 4D float attention_mask, but got rank=",
+                   rank,
+                   ", element type=",
+                   elem_type,
+                   ".");
+}
+
 }  // namespace
 
 class CutLMHead : public ov::pass::MatcherPass {
@@ -711,7 +754,13 @@ std::vector<std::shared_ptr<ov::Model>> ov::npuw::LLMCompiledModel::create_gener
                              << "): reshaping to static");
 
         // Reshape to target size
-        ov::npuw::ReshapeToStatic(max_generation_token_len, kv_size, axes, m_max_lora_rank, whisper_lhs_seq_size)
+        ov::npuw::ReshapeToStatic(max_generation_token_len,
+                                  kv_size,
+                                  axes,
+                                  m_max_lora_rank,
+                                  whisper_lhs_seq_size,
+                                  false,
+                                  m_attention_mask_is_4d_float)
             .run_on_model(generate_variant);
 
         if (m_cfg.get<::intel_npu::NPUW_LLM_ENABLE_SWA_KV_CACHE_SHRINK>()) {
@@ -911,6 +960,19 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
     const uint32_t seq_len_dim = m_cfg.get<::intel_npu::NPUW_LLM_SEQ_LEN_DIM>();
     KVAxesPosition axes{batch_dim, seq_len_dim};
 
+    m_attention_mask_is_4d_float = is_4d_float_attention_mask(model);
+    if (m_attention_mask_is_4d_float) {
+        LOG_INFO("Detected 4D float attention_mask contract [B, 1, Q, K] for NPUW LLM path.");
+        OPENVINO_ASSERT(!m_use_chunk_prefill,
+                        "4D float attention_mask mode does not support chunked prefill yet. "
+                        "Please disable chunked prefill by setting NPUW_LLM_PREFILL_CHUNK_SIZE >= "
+                        "NPUW_LLM_MAX_PROMPT_LEN or by using NPUW_LLM_PREFILL_HINT=STATIC.");
+        OPENVINO_ASSERT(!m_cfg.get<::intel_npu::NPUW_LLM_ENABLE_PREFIX_CACHING>(),
+                        "4D float attention_mask mode does not support NPUW_LLM_ENABLE_PREFIX_CACHING yet.");
+        OPENVINO_ASSERT(!m_enable_continuous_prefill,
+                        "4D float attention_mask mode does not support NPUW_LLM_ENABLE_CONTINUOUS_PREFILL yet.");
+    }
+
     LOG_DEBUG("Creating kvcache model as clone of passed one.");
     auto kvcache_model = model->clone();
 
@@ -967,8 +1029,12 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
     } else {
         LOG_DEBUG("Adding position_ids input in case it doesn't exist in model: LFM-2 case.");
         ov::npuw::AddPositionIdsParam().run_on_model(kvcache_model);
-        LOG_DEBUG("Right-align attention_mask slice for Conv operations: LFM-2 case.");
-        ov::npuw::RightAlignMaskSliceForConv().run_on_model(kvcache_model);
+        if (!m_attention_mask_is_4d_float) {
+            LOG_DEBUG("Right-align attention_mask slice for Conv operations: LFM-2 case.");
+            ov::npuw::RightAlignMaskSliceForConv().run_on_model(kvcache_model);
+        } else {
+            LOG_DEBUG("Skipping RightAlignMaskSliceForConv for 4D float attention_mask mode.");
+        }
         LOG_DEBUG("Transform kvcache model from stateful to stateless.");
         ov::pass::StatefulToStateless().run_on_model(kvcache_model);
     }
@@ -1002,7 +1068,7 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
     //    the KV cache still keeps the full context (no memory/perf savings).
     //  - ShrinkSlidingWindowKVCache: shrinks the KV cache to the window size and
     //    manages it as a sliding buffer at runtime for better memory/perf.
-    if (!m_is_whisper && !m_cfg.get<::intel_npu::NPUW_LLM_ENABLE_SWA_KV_CACHE_SHRINK>()) {
+    if (!m_is_whisper && !m_cfg.get<::intel_npu::NPUW_LLM_ENABLE_SWA_KV_CACHE_SHRINK>() && !m_attention_mask_is_4d_float) {
         LOG_DEBUG("Try patch sliding window attention mask (Phi-3, Gemma-2, Gemma-3, Gemma-4), if it exists.");
         ov::npuw::PatchSlidingWindowMask().run_on_model(kvcache_model);
     }
@@ -1056,7 +1122,8 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
                                   axes,
                                   m_max_lora_rank,
                                   0,
-                                  true)
+                      true,
+                      m_attention_mask_is_4d_float)
             .run_on_model(prefill_model);
     } else {
         ov::npuw::ReshapeToStatic(m_kvcache_desc.max_prompt_size,
@@ -1064,7 +1131,8 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
                                   axes,
                                   m_max_lora_rank,
                                   whisper_lhs_seq_size,
-                                  true)
+                      true,
+                      m_attention_mask_is_4d_float)
             .run_on_model(prefill_model);
     }
     LOG_DEBUG("Make kvcache model with static shapes");
@@ -1411,6 +1479,9 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
     // Apply block-based KV cache transformation for chunk prefill after ShapeOfParameter
     // This ensures ShapeOf nodes are already regularized before transformation
     if (m_cfg.get<::intel_npu::NPUW_LLM_ENABLE_BLOCK_BASED_KV_CACHE>()) {
+        OPENVINO_ASSERT(!m_attention_mask_is_4d_float,
+                        "4D float attention_mask mode does not support "
+                        "NPUW_LLM_ENABLE_BLOCK_BASED_KV_CACHE yet.");
         OPENVINO_ASSERT(!m_enable_prefix_caching,
                         "NPUW_LLM_ENABLE_BLOCK_BASED_KV_CACHE and NPUW_LLM_ENABLE_PREFIX_CACHING "
                         "cannot be enabled simultaneously — this combination is not yet supported. "

@@ -1037,12 +1037,12 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
 
     ov::npuw::ReplaceDeepstackScatterWithAdd().run_on_model(kvcache_model);
 
-    // Detect a "hidden_states" output before the cut removes it. cut_lm_head()
+    // Detect a hidden-state-like output before the cut removes it. cut_lm_head()
     // strips duplicate Results that share the embed source, so we must check
     // the model outputs while they are still intact.
     bool original_has_hidden_states = false;
     for (const auto& output : kvcache_model->outputs()) {
-        if (output.get_names().count("hidden_states") > 0) {
+        if (output.get_names().count("hidden_states") > 0 || output.get_names().count("last_hidden_state") > 0) {
             original_has_hidden_states = true;
             break;
         }
@@ -1051,7 +1051,8 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
     auto lm_head_model = check_and_cut_lm_head(kvcache_model, m_cfg);
     if (lm_head_model && original_has_hidden_states) {
         m_has_lm_head_hidden_states = true;
-        LOG_DEBUG("Model exposes \"hidden_states\" output - will be served via lm_head embed tensor at runtime.");
+        LOG_DEBUG("Model exposes hidden-state output (hidden_states/last_hidden_state) - will be served via "
+                  "lm_head embed tensor at runtime.");
     }
 
     // Detect attention mask kind before the SDPA subgraph is isolated by partitioning,

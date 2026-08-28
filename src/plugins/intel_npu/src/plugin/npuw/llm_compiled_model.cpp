@@ -1600,7 +1600,8 @@ void ov::npuw::LLMCompiledModel::serialize(std::ostream& raw_stream, const ov::n
             m_kvcache_desc.v_tensors_transposed_gen & m_prefill_chunk_size & m_use_chunk_prefill & m_max_lora_rank &
             m_enable_prefix_caching & m_prefix_caching_block_size & m_prefix_caching_max_num_blocks &
             m_longrope_context_limit & m_is_whisper & m_eos_token_id & m_decomposed_sdpa_size & m_is_eagle &
-            m_is_embedding & m_is_block_kv_cache & m_is_encoder_embedding & m_has_lm_head_hidden_states;
+            m_is_embedding & m_is_block_kv_cache & m_is_encoder_embedding & m_has_lm_head_hidden_states &
+            m_attention_mask_is_4d_float;
 
         // Write config
         stream & m_cfg;
@@ -1827,7 +1828,8 @@ std::shared_ptr<ov::npuw::LLMCompiledModel> ov::npuw::LLMCompiledModel::deserial
             compiled->m_prefix_caching_block_size & compiled->m_prefix_caching_max_num_blocks &
             compiled->m_longrope_context_limit & compiled->m_is_whisper & compiled->m_eos_token_id &
             compiled->m_decomposed_sdpa_size & compiled->m_is_eagle & compiled->m_is_embedding &
-            compiled->m_is_block_kv_cache & compiled->m_is_encoder_embedding & compiled->m_has_lm_head_hidden_states;
+            compiled->m_is_block_kv_cache & compiled->m_is_encoder_embedding & compiled->m_has_lm_head_hidden_states &
+            compiled->m_attention_mask_is_4d_float;
 
         // Deserialize config
         stream & compiled->m_cfg;

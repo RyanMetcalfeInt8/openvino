@@ -12,6 +12,9 @@ namespace ov::npuw {
 
 inline constexpr const char* NPUW_SUB128_SHIFT_RT_INFO = "npuw_sub128_shift";
 
+// Canonicalize constant parameter shapes and the weight transpose of terminal u8 LM heads.
+void normalize_vocab_weights(const std::shared_ptr<ov::Model>& model);
+
 class InsertVocabSub128 : public ov::pass::GraphRewrite {
 public:
     OPENVINO_GRAPH_REWRITE_RTTI("ov::npuw::InsertVocabSub128");

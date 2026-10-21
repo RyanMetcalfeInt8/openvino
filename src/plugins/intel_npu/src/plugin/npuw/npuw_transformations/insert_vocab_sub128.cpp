@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "openvino/core/graph_util.hpp"
+#include "openvino/core/rt_info.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
@@ -14,6 +15,7 @@
 #include "openvino/op/matmul.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/result.hpp"
+#include "openvino/op/reshape.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/tanh.hpp"
 #include "openvino/op/transpose.hpp"
@@ -22,6 +24,7 @@
 #include "openvino/pass/pattern/op/or.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "transformations/rt_info/decompression.hpp"
+#include "transformations/common_optimizations/moc_transformations.hpp"
 
 namespace opp = ov::pass::pattern;
 
@@ -117,6 +120,74 @@ public:
 #endif
 
 }  // namespace
+
+void ov::npuw::normalize_vocab_weights(const std::shared_ptr<ov::Model>& model) {
+    for (const auto& result : model->get_results()) {
+        auto matmul = ov::as_type_ptr<ov::op::v0::MatMul>(result->input_value(0).get_node_shared_ptr());
+        if (!matmul)
+            continue;
+        auto weight = matmul->input_value(1);
+        auto transpose = ov::as_type_ptr<ov::op::v1::Transpose>(weight.get_node_shared_ptr());
+        if (transpose) {
+            auto order = ov::as_type_ptr<ov::op::v0::Constant>(transpose->get_input_node_shared_ptr(1));
+            if (!order || order->cast_vector<int64_t>() != std::vector<int64_t>{1, 0})
+                continue;
+            weight = transpose->input_value(0);
+        }
+        auto node = weight.get_node_shared_ptr();
+        if (ov::is_type<ov::op::v0::Convert>(node))
+            node = node->get_input_node_shared_ptr(0);
+        auto multiply = ov::as_type_ptr<ov::op::v1::Multiply>(node);
+        if (!multiply)
+            continue;
+        auto subtract = ov::as_type_ptr<ov::op::v1::Subtract>(multiply->get_input_node_shared_ptr(0));
+        if (!subtract)
+            continue;
+        auto weight_convert = ov::as_type_ptr<ov::op::v0::Convert>(subtract->get_input_node_shared_ptr(0));
+        auto zp_input = subtract->get_input_node_shared_ptr(1);
+        auto zp_reshape = ov::as_type_ptr<ov::op::v1::Reshape>(zp_input);
+        if (zp_reshape) {
+            if (!ov::is_type<ov::op::v0::Constant>(zp_reshape->get_input_node_shared_ptr(1)))
+                continue;
+            zp_input = zp_reshape->get_input_node_shared_ptr(0);
+        }
+        auto zp_convert = ov::as_type_ptr<ov::op::v0::Convert>(zp_input);
+        if (!weight_convert || !zp_convert ||
+            !ov::is_type<ov::op::v0::Constant>(weight_convert->get_input_node_shared_ptr(0)) ||
+            weight_convert->get_input_element_type(0) != ov::element::u8)
+            continue;
+        const auto constant_parameter = [](const std::shared_ptr<ov::Node>& parameter) {
+            if (ov::is_type<ov::op::v0::Constant>(parameter))
+                return true;
+            auto reshape = ov::as_type_ptr<ov::op::v1::Reshape>(parameter);
+            return reshape && ov::is_type<ov::op::v0::Constant>(reshape->get_input_node_shared_ptr(0)) &&
+                   ov::is_type<ov::op::v0::Constant>(reshape->get_input_node_shared_ptr(1));
+        };
+        if (!constant_parameter(multiply->get_input_node_shared_ptr(1)) ||
+            !constant_parameter(zp_convert->get_input_node_shared_ptr(0)))
+            continue;
+        if (!transpose && !zp_reshape && ov::is_type<ov::op::v0::Constant>(multiply->get_input_node_shared_ptr(1)) &&
+            ov::is_type<ov::op::v0::Constant>(zp_convert->get_input_node_shared_ptr(0)))
+            continue;
+
+        // Reuse the existing low-precision-aware normalization only on the
+        // constant head weights, leaving the decoder and activation path alone.
+        auto weights_model = std::make_shared<ov::Model>(ov::OutputVector{weight}, ov::ParameterVector{});
+        ov::pass::MOCTransformations(false).run_on_model(weights_model);
+        weight = weights_model->get_results()[0]->input_value(0);
+        if (!transpose)
+            matmul->input(1).replace_source_output(weight);
+        if (transpose) {
+            auto replacement = std::make_shared<ov::op::v0::MatMul>(matmul->input_value(0),
+                                                                  weight,
+                                                                  matmul->get_transpose_a(),
+                                                                  !matmul->get_transpose_b());
+            ov::copy_runtime_info({matmul, transpose}, replacement);
+            replacement->set_friendly_name(matmul->get_friendly_name());
+            ov::replace_node(matmul, replacement);
+        }
+    }
+}
 
 ov::npuw::InsertVocabSub128::InsertVocabSub128() {
     add_matcher<InsertVocabSub128Matcher>();

@@ -46,21 +46,32 @@ ov::OutputVector rms_normalization(const ov::frontend::onnx::Node& node) {
         x = std::make_shared<v0::Convert>(x, stash_type);
     }
 
-    // normalized_axes = [axis, axis+1, ..., rank(X)-1]
-    // For axis < 0, equivalent to Range(axis, 0, 1) which yields exactly the
-    // negative tail (e.g. axis=-2 → [-2, -1]).
-    const auto axes_start = v0::Constant::create(ov::element::i64, ov::Shape{}, {axis});
-    const auto axes_step = v0::Constant::create(ov::element::i64, ov::Shape{}, {1});
-    ov::Output<ov::Node> axes_end;
-    if (axis < 0) {
-        axes_end = v0::Constant::create(ov::element::i64, ov::Shape{}, {0});
+    // Constant axes expose the shared decomposition to RMSFusion before
+    // backend constant folding. Negative axes do not require a known rank.
+    const auto rank = x.get_partial_shape().rank();
+    ov::Output<ov::Node> axes;
+    if (axis < 0 || rank.is_static()) {
+        if (rank.is_static()) {
+            CHECK_VALID_NODE(node,
+                             axis >= -rank.get_length() && axis < rank.get_length(),
+                             "RMSNormalization axis is out of range: ",
+                             axis);
+        }
+        const auto end = axis < 0 ? int64_t{0} : rank.get_length();
+        std::vector<int64_t> values;
+        for (auto current = axis; current < end; ++current) {
+            values.push_back(current);
+        }
+        axes = v0::Constant::create(ov::element::i64, ov::Shape{values.size()}, values);
     } else {
         // rank(x) = Squeeze(ShapeOf(ShapeOf(x)))
         auto x_shape = std::make_shared<v3::ShapeOf>(x, ov::element::i64);
         auto x_rank_1d = std::make_shared<v3::ShapeOf>(x_shape, ov::element::i64);
-        axes_end = std::make_shared<v0::Squeeze>(x_rank_1d);
+        auto axes_end = std::make_shared<v0::Squeeze>(x_rank_1d);
+        auto axes_start = v0::Constant::create(ov::element::i64, ov::Shape{}, {axis});
+        auto axes_step = v0::Constant::create(ov::element::i64, ov::Shape{}, {1});
+        axes = std::make_shared<v4::Range>(axes_start, axes_end, axes_step, ov::element::i64);
     }
-    auto axes = std::make_shared<v4::Range>(axes_start, axes_end, axes_step, ov::element::i64);
 
     // Epsilon constant in the same precision as `x` (the helper's Add(ReduceMean, eps)
     // requires matching dtypes; RMSFusion expects raw Constant, not ConvertLike).

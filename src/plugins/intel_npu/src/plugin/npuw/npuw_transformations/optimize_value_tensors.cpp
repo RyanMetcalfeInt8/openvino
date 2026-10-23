@@ -8,6 +8,7 @@
 
 #include "../llm_compiled_model_utils.hpp"
 #include "../logging.hpp"
+#include "../util.hpp"
 #include "openvino/core/graph_util.hpp"
 #include "openvino/op/ops.hpp"
 #include "openvino/pass/graph_rewrite.hpp"
@@ -419,6 +420,30 @@ public:
 }  // namespace
 
 bool ov::npuw::util::OptimizeValueTensors::run_on_model(const std::shared_ptr<ov::Model>& model) {
+    // Shared V-cache branches may contain additional layout operations that
+    // these matchers do not update. Keep the original layout in that case.
+    for (const auto& op : model->get_ops()) {
+        auto concat = ov::as_type_ptr<ov::op::v0::Concat>(op);
+        if (!concat || concat->get_input_size() < 2)
+            continue;
+        auto past = concat->get_input_node_shared_ptr(0);
+        if (ov::is_type<ov::op::v0::Convert>(past))
+            past = past->get_input_node_shared_ptr(0);
+        auto param = ov::as_type_ptr<ov::op::v0::Parameter>(past);
+        if (!param || !ov::npuw::util::isPastValueParam(param->get_friendly_name()))
+            continue;
+        size_t data_consumers = 0;
+        for (const auto& target : concat->output(0).get_target_inputs()) {
+            const auto* consumer = target.get_node();
+            if (!ov::is_type<ov::op::v0::Result>(consumer) &&
+                !ov::is_type<ov::op::v0::ShapeOf>(consumer) && !ov::is_type<ov::op::v3::ShapeOf>(consumer))
+                ++data_consumers;
+        }
+        if (data_consumers > 1) {
+            LOG_DEBUG("Skipping V-cache layout optimization for shared cache " << concat->get_friendly_name());
+            return false;
+        }
+    }
     ov::pass::GraphRewrite rewr;
 
     // Check if any SDPA has sink input

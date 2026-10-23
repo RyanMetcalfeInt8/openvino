@@ -10,6 +10,7 @@
 #include "core/operator_set.hpp"
 #include "exceptions.hpp"
 #include "openvino/op/add.hpp"
+#include "openvino/op/broadcast.hpp"
 #include "openvino/op/concat.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
@@ -26,7 +27,6 @@
 #include "openvino/op/shape_of.hpp"
 #include "openvino/op/squeeze.hpp"
 #include "openvino/op/subtract.hpp"
-#include "openvino/op/tile.hpp"
 #include "openvino/op/transpose.hpp"
 #include "openvino/op/unsqueeze.hpp"
 #include "utils/common.hpp"
@@ -57,12 +57,14 @@ ov::Output<ov::Node> repeat_kv(const ov::Output<ov::Node>& input, int64_t n_rep)
     // (B, kv_h, seq, h) -> (B, kv_h, 1, seq, h) -> (B, kv_h, n_rep, seq, h)
     auto axis2 = v0::Constant::create(ov::element::i64, ov::Shape{1}, {2});
     auto unsq = std::make_shared<v0::Unsqueeze>(input, axis2);
-    auto tile_repeats = v0::Constant::create(ov::element::i64, ov::Shape{5}, std::vector<int64_t>{1, 1, n_rep, 1, 1});
-    auto tiled = std::make_shared<v0::Tile>(unsq, tile_repeats);
+    // Bidirectional broadcasting preserves the input dimensions and expands only
+    // the inserted singleton group axis, exposing the GQA pattern to backend fusions.
+    auto broadcast_shape = v0::Constant::create(ov::element::i64, ov::Shape{5}, std::vector<int64_t>{1, 1, n_rep, 1, 1});
+    auto repeated = std::make_shared<v3::Broadcast>(unsq, broadcast_shape, ov::op::BroadcastType::BIDIRECTIONAL);
 
     // merge (kv_h, n_rep) -> kv_h*n_rep : (B, kv_h*n_rep, seq, h)
     auto new_shape = std::make_shared<v0::Concat>(ov::OutputVector{batch, new_heads, seq, head}, 0);
-    return std::make_shared<v1::Reshape>(tiled, new_shape, false);
+    return std::make_shared<v1::Reshape>(repeated, new_shape, false);
 }
 
 const float NEG_INF = -std::numeric_limits<float>::infinity();

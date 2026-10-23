@@ -123,7 +123,18 @@ public:
 
 void ov::npuw::normalize_vocab_weights(const std::shared_ptr<ov::Model>& model) {
     for (const auto& result : model->get_results()) {
-        auto matmul = ov::as_type_ptr<ov::op::v0::MatMul>(result->input_value(0).get_node_shared_ptr());
+        auto head = result->input_value(0).get_node_shared_ptr();
+        // Gemma logits have a constant-parameter softcap after the LM head.
+        // Keep the suffix intact and normalize only the MatMul weight branch.
+        if (auto multiply = ov::as_type_ptr<ov::op::v1::Multiply>(head)) {
+            auto tanh = ov::as_type_ptr<ov::op::v0::Tanh>(multiply->get_input_node_shared_ptr(0));
+            auto divide = tanh ? ov::as_type_ptr<ov::op::v1::Divide>(tanh->get_input_node_shared_ptr(0)) : nullptr;
+            if (divide && ov::is_type<ov::op::v0::Constant>(multiply->get_input_node_shared_ptr(1)) &&
+                ov::is_type<ov::op::v0::Constant>(divide->get_input_node_shared_ptr(1))) {
+                head = divide->get_input_node_shared_ptr(0);
+            }
+        }
+        auto matmul = ov::as_type_ptr<ov::op::v0::MatMul>(head);
         if (!matmul)
             continue;
         auto weight = matmul->input_value(1);

@@ -9,7 +9,9 @@ namespace {
 using namespace ov;
 namespace ops = ov::opset13;
 
-TEST(NormalizeVocabWeights, FoldsOnlyTerminalQuantizationParametersAndTranspose) {
+class NormalizeVocabWeightsTerminal : public ::testing::TestWithParam<bool> {};
+
+TEST_P(NormalizeVocabWeightsTerminal, FoldsOnlyTerminalQuantizationParametersAndTranspose) {
     auto hidden = std::make_shared<ops::Parameter>(element::f32, Shape{1, 1, 4});
     auto weights = ops::Constant::create(element::u8, Shape{8, 4}, {128});
     auto scale = ops::Constant::create(element::f16, Shape{8}, {0.5});
@@ -27,11 +29,19 @@ TEST(NormalizeVocabWeights, FoldsOnlyTerminalQuantizationParametersAndTranspose)
     auto mm = std::make_shared<ops::MatMul>(hidden, transpose, false, false);
     mm->set_friendly_name("lm_head");
     mm->output(0).get_tensor().set_names({"logits"});
-    auto model = std::make_shared<Model>(OutputVector{mm}, ParameterVector{hidden});
+    std::shared_ptr<Node> output = mm;
+    std::shared_ptr<ops::Divide> divide;
+    if (GetParam()) {
+        auto cap = ops::Constant::create(element::f32, Shape{}, {30});
+        divide = std::make_shared<ops::Divide>(mm, cap);
+        output = std::make_shared<ops::Multiply>(std::make_shared<ops::Tanh>(divide), cap);
+    }
+    auto model = std::make_shared<Model>(OutputVector{output}, ParameterVector{hidden});
 
     ov::npuw::normalize_vocab_weights(model);
     model->validate_nodes_and_infer_types();
-    auto normalized = ov::as_type_ptr<ops::MatMul>(model->get_results()[0]->get_input_node_shared_ptr(0));
+    auto normalized = ov::as_type_ptr<ops::MatMul>(
+        divide ? divide->get_input_node_shared_ptr(0) : model->get_results()[0]->get_input_node_shared_ptr(0));
     ASSERT_TRUE(normalized);
     EXPECT_TRUE(normalized->get_transpose_b());
     EXPECT_EQ(normalized->input_value(1).get_element_type(), element::f32);
@@ -43,8 +53,13 @@ TEST(NormalizeVocabWeights, FoldsOnlyTerminalQuantizationParametersAndTranspose)
     EXPECT_TRUE(ov::is_type<ops::Constant>(normalized_sub->get_input_node_shared_ptr(1)->get_input_node_shared_ptr(0)));
     EXPECT_EQ(normalized_sub->get_input_node_shared_ptr(0)->get_input_node_shared_ptr(0), weights);
     ov::npuw::normalize_vocab_weights(model);
-    EXPECT_EQ(model->get_results()[0]->get_input_node_shared_ptr(0), normalized);
+    EXPECT_EQ(divide ? divide->get_input_node_shared_ptr(0) : model->get_results()[0]->get_input_node_shared_ptr(0),
+              normalized);
+    if (divide)
+        EXPECT_EQ(model->get_results()[0]->get_input_node_shared_ptr(0), output);
 }
+
+INSTANTIATE_TEST_SUITE_P(DirectAndSoftcapped, NormalizeVocabWeightsTerminal, ::testing::Bool());
 
 TEST(NormalizeVocabWeights, LeavesFloatingPointHeadUnchanged) {
     auto hidden = std::make_shared<ops::Parameter>(element::f32, Shape{1, 1, 4});

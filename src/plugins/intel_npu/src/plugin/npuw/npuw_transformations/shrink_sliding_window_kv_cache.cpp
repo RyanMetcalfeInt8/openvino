@@ -154,6 +154,15 @@ std::shared_ptr<ov::op::v0::Concat> scan_kv_path(const std::shared_ptr<SDPA>& sd
 
             const size_t kv_axis = vals.size() - 2;
             const int64_t old_val = vals[kv_axis];
+            // BIDIRECTIONAL Broadcast may expand only the group axis using
+            // [1,1,n_rep,1,1]. Its singleton sequence target preserves the
+            // data extent, so it must remain 1 when the cache is shortened.
+            auto broadcast = ov::as_type_ptr<ov::op::v3::Broadcast>(cur);
+            if (old_val == 1 && broadcast &&
+                broadcast->get_broadcast_spec().m_type == ov::op::BroadcastType::BIDIRECTIONAL) {
+                cur = cur->input_value(0).get_node_shared_ptr();
+                continue;
+            }
             // Reshape/Broadcast target-shape subgraphs may be shared (CSE'd) across multiple SWA
             // layers, so a node reached via one layer may already carry new_kv_total from another.
             if (old_val == new_kv_total) {

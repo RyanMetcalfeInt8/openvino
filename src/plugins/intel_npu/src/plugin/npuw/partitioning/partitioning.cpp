@@ -1724,6 +1724,37 @@ void Partitioner::matchResults(const std::string& func_name) {
     auto& func = all_functions.at(func_name);
     auto& model_group = func.mdls;
 
+    // Calls may expose different subsets of the same repeated computation
+    // (e.g. a KV source also used by later layers). Extend the original body to
+    // expose all required writers; callers may leave unused protocol outputs unbound.
+    std::set<RKey> required_results;
+    std::vector<std::set<RKey>> call_results;
+    for (const auto& call : model_group) {
+        std::set<RKey> writers;
+        for (const auto& result : call->get_results()) {
+            const auto port = result->input_value(0);
+            writers.emplace(layer_to_prototype.at(port.get_node()->get_friendly_name()), port.get_index());
+        }
+        required_results.insert(writers.begin(), writers.end());
+        call_results.push_back(std::move(writers));
+    }
+    // Keep the original parameter protocol. Expose additional existing writer
+    // nodes on the prototype rather than selecting a different call body.
+    for (const auto& key : required_results) {
+        if (call_results.front().count(key))
+            continue;
+        const auto& body = model_group.front();
+        const auto ops = body->get_ordered_ops();
+        const auto writer = std::find_if(ops.begin(), ops.end(), [&](const auto& node) {
+            const auto mapping = layer_to_prototype.find(node->get_friendly_name());
+            return mapping != layer_to_prototype.end() && mapping->second == key.first;
+        });
+        OPENVINO_ASSERT(writer != ops.end(), "NPUW missing repeated output writer: ", key.first);
+        auto result = std::make_shared<ov::op::v0::Result>((*writer)->output(key.second));
+        body->add_results({result});
+        func.refs.front().get()._results.push_back(result);
+    }
+
     // FIXME: Here we rely on sacred knowledge that the first
     // subgraph in the list is the prototype... Use this to
     // initialize the proto result writer map
@@ -1733,7 +1764,7 @@ void Partitioner::matchResults(const std::string& func_name) {
         for (auto&& node : body->get_ordered_ops()) {
             if (ov::op::util::is_output(node)) {
                 auto&& port = node->input(0).get_source_output();
-                RKey rkey = {port.get_node()->get_friendly_name(), port.get_index()};
+                RKey rkey = {layer_to_prototype.at(port.get_node()->get_friendly_name()), port.get_index()};
                 proto_results[rkey] = std::dynamic_pointer_cast<RPtr::element_type>(node);
             }
         }
@@ -1747,8 +1778,17 @@ void Partitioner::matchResults(const std::string& func_name) {
         for (auto&& node : call->get_ordered_ops()) {
             if (ov::op::util::is_output(node)) {
                 auto&& port = node->input(0).get_source_output();
-                RKey rkey = {layer_to_prototype.at(port.get_node()->get_friendly_name()), port.get_index()};
-                auto& orig_result = proto_results.at(rkey);
+                const auto writer_name = port.get_node()->get_friendly_name();
+                const auto prototype = layer_to_prototype.find(writer_name);
+                OPENVINO_ASSERT(prototype != layer_to_prototype.end(),
+                                "NPUW result writer has no prototype: function=", func_name,
+                                " call=", call_idx, " writer=", writer_name, " type=", port.get_node()->get_type_name());
+                RKey rkey = {prototype->second, port.get_index()};
+                const auto result = proto_results.find(rkey);
+                OPENVINO_ASSERT(result != proto_results.end(),
+                                "NPUW prototype has no matching result: function=", func_name,
+                                " call=", call_idx, " writer=", writer_name, " prototype=", prototype->second);
+                auto& orig_result = result->second;
                 auto this_result = std::dynamic_pointer_cast<RPtr::element_type>(node);
                 func.result_call_to_proto[SubgResult(subg_ref, this_result)] = orig_result;
             }

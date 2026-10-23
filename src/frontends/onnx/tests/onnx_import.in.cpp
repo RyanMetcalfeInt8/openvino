@@ -8148,6 +8148,14 @@ OPENVINO_TEST(${BACKEND_NAME}, onnx_layer_normalization_biased) {
 // node conformance suite (test_rms_normalization_*).
 OPENVINO_TEST(${BACKEND_NAME}, onnx_rms_normalization) {
     const auto model = convert_model("rms_normalization.onnx");
+    size_t reductions = 0;
+    for (const auto& node : model->get_ops()) {
+        if (node->get_type_name() == std::string("ReduceMean")) {
+            EXPECT_EQ(node->get_input_node_shared_ptr(1)->get_type_name(), std::string("Constant"));
+            ++reductions;
+        }
+    }
+    EXPECT_EQ(reductions, 1);
     auto test_case = test::TestCase(model, s_device);
 
     test_case.add_input<float>(Shape{2, 4}, {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 1.0f, 1.0f, 1.0f});

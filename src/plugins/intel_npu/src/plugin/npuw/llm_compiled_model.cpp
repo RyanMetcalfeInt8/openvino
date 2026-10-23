@@ -1378,6 +1378,37 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
         }
     }
 
+    // Resolve static prefill shape values before partitioning can turn them into
+    // Parameters. In particular, mask Pad sizes and causal Range limits must
+    // remain known to the compiler. Only scalar integer arithmetic is folded.
+    ov::npuw::patterns::util::FoldShapeComputeChain().run_on_model(prefill_model);
+    {
+        ov::pass::GraphRewrite shape_arithmetic;
+        shape_arithmetic.add_matcher<ov::npuw::patterns::util::FoldEltwiseOfConsts>();
+        shape_arithmetic.run_on_model(prefill_model);
+    }
+    // Shape dimensions may also be selected with Slice/Squeeze rather than
+    // Gather. Fold these tiny integer tensors without folding Range outputs
+    // or large constants such as decompressed weights.
+    for (const auto& node : prefill_model->get_ordered_ops()) {
+        if (!ov::is_type<ov::op::v8::Slice>(node) && !ov::is_type<ov::op::v0::Squeeze>(node))
+            continue;
+        if (!node->get_output_element_type(0).is_integral() ||
+            node->get_output_partial_shape(0).is_dynamic() || ov::shape_size(node->get_output_shape(0)) > 8)
+            continue;
+        ov::OutputVector inputs;
+        for (const auto& input : node->input_values()) {
+            if (!ov::is_type<ov::op::v0::Constant>(input.get_node_shared_ptr()))
+                break;
+            inputs.push_back(input);
+        }
+        if (inputs.size() != node->get_input_size())
+            continue;
+        ov::OutputVector outputs(node->get_output_size());
+        if (node->constant_fold(outputs, inputs))
+            ov::replace_node(node, outputs);
+    }
+
     // Regularize models for the better partitioning assuming it is a transformer
     // Apply these transformations to all variant models
     {

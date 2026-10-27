@@ -1,0 +1,102 @@
+ir_version: 11
+graph {
+  node {
+    input: "data"
+    output: "result"
+    op_type: "Scan"
+    attribute {
+      name: "body"
+      g {
+        node {
+          input: "slice"
+          input: "bias"
+          output: "out"
+          op_type: "Add"
+        }
+        name: "body"
+        input {
+          name: "slice"
+          type {
+            tensor_type {
+              elem_type: 1
+              shape {
+                dim {
+                  dim_value: 2
+                }
+              }
+            }
+          }
+        }
+        output {
+          name: "out"
+          type {
+            tensor_type {
+              elem_type: 1
+              shape {
+                dim {
+                  dim_value: 2
+                }
+              }
+            }
+          }
+        }
+      }
+      type: GRAPH
+    }
+    attribute {
+      name: "num_scan_inputs"
+      i: 1
+      type: INT
+    }
+  }
+  name: "scan_capture"
+  input {
+    name: "data"
+    type {
+      tensor_type {
+        elem_type: 1
+        shape {
+          dim {
+            dim_value: 3
+          }
+          dim {
+            dim_value: 2
+          }
+        }
+      }
+    }
+  }
+  input {
+    name: "bias"
+    type {
+      tensor_type {
+        elem_type: 1
+        shape {
+          dim {
+            dim_value: 2
+          }
+        }
+      }
+    }
+  }
+  output {
+    name: "result"
+    type {
+      tensor_type {
+        elem_type: 1
+        shape {
+          dim {
+            dim_value: 3
+          }
+          dim {
+            dim_value: 2
+          }
+        }
+      }
+    }
+  }
+}
+opset_import {
+  domain: ""
+  version: 24
+}

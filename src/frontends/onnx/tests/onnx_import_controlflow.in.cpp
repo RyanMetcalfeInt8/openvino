@@ -839,6 +839,15 @@ OPENVINO_TEST(${BACKEND_NAME}, onnx_scan_with_initializer_as_output) {
     test_case.run();
 }
 
+OPENVINO_TEST(${BACKEND_NAME}, onnx_scan_with_parent_capture) {
+    const auto model = convert_model("controlflow/scan_with_parent_capture.onnx");
+    auto test_case = ov::test::TestCase(model, s_device);
+    test_case.add_input<float>(Shape{3, 2}, {0, 1, 2, 3, 4, 5});
+    test_case.add_input<float>(Shape{2}, {10, 20});
+    test_case.add_expected_output<float>(Shape{3, 2}, {10, 21, 12, 23, 14, 25});
+    test_case.run();
+}
+
 OPENVINO_TEST(${BACKEND_NAME}, onnx_if_negative_mismatch_between_branches_output) {
     try {
         const auto model = convert_model("controlflow/if_negative_mismatch_between_branches_output.onnx");

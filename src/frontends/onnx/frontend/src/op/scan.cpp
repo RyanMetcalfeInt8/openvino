@@ -13,12 +13,15 @@
 #include "openvino/op/tensor_iterator.hpp"
 #include "openvino/op/unsqueeze.hpp"
 #include "openvino/op/util/op_types.hpp"
+#include "translate_session.hpp"
 #include "utils/common.hpp"
 using namespace ov::op;
 
 namespace ov::frontend::onnx::ai_onnx {
 
 namespace {
+
+using InvariantInput = std::pair<std::shared_ptr<v0::Parameter>, ov::Output<ov::Node>>;
 
 ov::OutputVector scan_to_tensor_iterator(const ov::OutputVector& node_inputs,
                                          ov::ParameterVector& body_inputs,
@@ -28,6 +31,7 @@ ov::OutputVector scan_to_tensor_iterator(const ov::OutputVector& node_inputs,
                                          const std::vector<int64_t>& scan_input_directions,
                                          const std::vector<int64_t>& scan_output_axes,
                                          const std::vector<int64_t>& scan_output_directions,
+                                         const std::vector<InvariantInput>& invariants,
                                          size_t in_offset = 0,
                                          const std::string& node_description = "") {
     FRONT_END_OP_CONVERSION_CHECK(
@@ -97,8 +101,13 @@ ov::OutputVector scan_to_tensor_iterator(const ov::OutputVector& node_inputs,
 
     // TensorIterator setup
     auto tensor_iterator = std::make_shared<v0::TensorIterator>();
-    auto ti_body = std::make_shared<ov::Model>(body_outputs, body_inputs);
+    auto all_body_inputs = body_inputs;
+    for (const auto& invariant : invariants)
+        all_body_inputs.push_back(invariant.first);
+    auto ti_body = std::make_shared<ov::Model>(body_outputs, all_body_inputs);
     tensor_iterator->set_function(ti_body);
+    for (const auto& invariant : invariants)
+        tensor_iterator->set_invariant_input(invariant.first, invariant.second);
 
     // Set slicing for Scan (TensorIterator) inputs
     for (size_t i = 0; i < num_scan_inputs; ++i) {
@@ -142,18 +151,40 @@ ov::OutputVector import_onnx_scan(const ov::frontend::onnx::Node& node,
 
     ParameterVector body_inputs;
     OutputVector body_outputs;
+    std::vector<InvariantInput> invariants;
     if (!node.has_decoder()) {
         const auto& subgraphs = node.get_subgraphs();
         auto body_graph = subgraphs.at("body");
         body_outputs = body_graph->get_ov_outputs();
         body_inputs = body_graph->get_ng_parameters();
+        const auto& parent_inputs = body_graph->get_inputs_from_parent();
+        FRONT_END_OP_CONVERSION_CHECK(body_inputs.size() >= parent_inputs.size(), "Invalid Scan captures");
+        const auto explicit_count = body_inputs.size() - parent_inputs.size();
+        for (size_t i = 0; i < parent_inputs.size(); ++i)
+            invariants.emplace_back(body_inputs[explicit_count + i], parent_inputs[i]);
+        body_inputs.resize(explicit_count);
 
     } else {
         auto body_graph = node.get_attribute_value<std::shared_ptr<ov::Model>>("body");
         for (const auto& res : body_graph->get_results()) {
             body_outputs.push_back(res->get_input_source_output(0));
         }
-        body_inputs = body_graph->get_parameters();
+        const auto session = node.get_translate_session();
+        FRONT_END_OP_CONVERSION_CHECK(session != nullptr, "Translate session is required for Scan captures");
+        for (const auto& param : body_graph->get_parameters()) {
+            ov::Output<ov::Node> captured;
+            for (const auto& name : param->output(0).get_names()) {
+                captured = session->lookup_tensor(name);
+                if (captured.get_node() != nullptr)
+                    break;
+            }
+            if (captured.get_node() == nullptr)
+                captured = session->lookup_tensor(param->get_friendly_name());
+            if (captured.get_node() != nullptr)
+                invariants.emplace_back(param, captured);
+            else
+                body_inputs.push_back(param);
+        }
 
         // The InputModel for subgraphs may register parent-scope constants that
         // are also declared as body graph outputs (initializer-as-output) as
@@ -245,6 +276,7 @@ ov::OutputVector import_onnx_scan(const ov::frontend::onnx::Node& node,
                                    scan_input_directions,
                                    scan_output_axes,
                                    scan_output_directions,
+                                   invariants,
                                    in_offset,
                                    node.get_description());
 }

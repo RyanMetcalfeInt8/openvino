@@ -1042,6 +1042,7 @@ ov::npuw::LLMCompiledModel::LLMCompiledModel(const std::shared_ptr<ov::Model>& m
         }
         LOG_DEBUG("Transform kvcache model from stateful to stateless.");
         ov::pass::StatefulToStateless().run_on_model(kvcache_model);
+        ov::npuw::util::normalize_restored_linear_cache_names(kvcache_model);
     }
 
     // Reported after the embedding branch, since an encoder embedding model turns chunking off and

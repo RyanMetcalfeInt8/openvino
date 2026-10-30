@@ -31,6 +31,10 @@ constexpr const char* kSlidingWindowAttentionMaskParamName = "sliding_window_att
 
 bool has_input(const std::shared_ptr<ov::Model>& model, const std::string& name);
 
+// Normalize restored Mobius conv/recurrent cache ports to NPUW's internal
+// linear-cache naming convention. Call after StatefulToStateless.
+bool normalize_restored_linear_cache_names(const std::shared_ptr<ov::Model>& model);
+
 // Returns the KV-cache Concat that feeds an SDPA's key input through the autoregressive
 // Concat->Broadcast->Reshape chain, or nullptr if the key input does not have that shape.
 // Classification and reconstruction both key on this pattern, so they share one predicate

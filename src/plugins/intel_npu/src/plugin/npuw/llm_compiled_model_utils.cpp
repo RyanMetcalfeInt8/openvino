@@ -5,6 +5,8 @@
 #include "llm_compiled_model_utils.hpp"
 
 #include <cstring>
+#include <regex>
+#include <set>
 
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
@@ -12,6 +14,7 @@
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/scaled_dot_product_attention.hpp"
 #include "openvino/op/subtract.hpp"
+#include "openvino/op/util/node_util.hpp"
 #include "openvino/pass/pattern/matcher.hpp"
 #include "openvino/pass/pattern/op/optional.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
@@ -22,6 +25,56 @@ bool ov::npuw::util::has_input(const std::shared_ptr<ov::Model>& model, const st
         return port.get_names().count(name) != 0;
     });
     return it != inputs.end();
+}
+
+bool ov::npuw::util::normalize_restored_linear_cache_names(const std::shared_ptr<ov::Model>& model) {
+    static const std::regex restored_input(
+        R"(^input_restored\.(past_key_values\.(\d+)\.(conv_state|recurrent_state)present\.\2\.\3)$)");
+    struct Rename {
+        std::shared_ptr<ov::Node> node;
+        std::string name;
+    };
+    std::vector<Rename> renames;
+    std::set<std::string> reserved_names;
+    auto reserve_names = [&](const auto& nodes) {
+        for (const auto& node : nodes) {
+            reserved_names.insert(node->get_friendly_name());
+            const auto& names = node->output(0).get_names();
+            reserved_names.insert(names.begin(), names.end());
+        }
+    };
+    reserve_names(model->get_parameters());
+    reserve_names(model->get_results());
+    // Validate the entire plan before changing any names. The original pair is
+    // encoded in the variable ID by MakeStateful; unrelated states stay intact.
+    for (const auto& param : model->get_parameters()) {
+        for (const auto& name : param->output(0).get_names()) {
+            std::smatch match;
+            if (!std::regex_match(name, match, restored_input))
+                continue;
+            const auto output_name = "output_restored." + match[1].str();
+            std::shared_ptr<ov::op::v0::Result> paired_result;
+            for (const auto& result : model->get_results()) {
+                if (result->output(0).get_names().count(output_name)) {
+                    OPENVINO_ASSERT(!paired_result, "NPUW: duplicate restored linear-cache output: ", output_name);
+                    paired_result = result;
+                }
+            }
+            OPENVINO_ASSERT(paired_result, "NPUW: missing restored linear-cache output: ", output_name);
+            const std::string role = match[3].str() == "conv_state" ? "conv" : "ssm";
+            const auto suffix = role + "." + match[2].str();
+            const auto past_name = "cache_params.past." + suffix;
+            const auto present_name = "cache_params.present." + suffix;
+            OPENVINO_ASSERT(reserved_names.insert(past_name).second && reserved_names.insert(present_name).second,
+                            "NPUW: linear-cache name collision: ",
+                            suffix);
+            renames.push_back({param, past_name});
+            renames.push_back({paired_result, present_name});
+        }
+    }
+    for (const auto& rename : renames)
+        ov::op::util::set_name(*rename.node, rename.name);
+    return !renames.empty();
 }
 
 std::shared_ptr<ov::Node> ov::npuw::util::find_kv_cache_concat(const std::shared_ptr<ov::Node>& sdpa) {

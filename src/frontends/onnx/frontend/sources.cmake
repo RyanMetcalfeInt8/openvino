@@ -161,6 +161,7 @@ set(op_list
     ${CMAKE_CURRENT_LIST_DIR}/src/op/org.openvinotoolkit/group_norm.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/op/org.openvinotoolkit/normalize.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/op/org.openvinotoolkit/prior_box.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/op/org.openvinotoolkit/recurrent_gdn.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/op/org.openvinotoolkit/swish.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/op/pad.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/op/pow.cpp

@@ -40,6 +40,25 @@ static std::string s_device = backend_name_to_device("${BACKEND_NAME}");
 using Inputs = std::vector<std::vector<float>>;
 using Outputs = std::vector<std::vector<float>>;
 
+OPENVINO_TEST(${BACKEND_NAME}, onnx_recurrent_gdn_nonzero_state) {
+    auto model = convert_model("recurrent_gdn.onnx");
+    auto test_case = ov::test::TestCase(model, s_device);
+    test_case.add_input<float>({1.f, 1.f});
+    test_case.add_input<float>({1.f, 1.f});
+    test_case.add_input<float>({2.f, 3.f, 2.f, 3.f});
+    test_case.add_input<float>({0.f, 0.f});
+    test_case.add_input<float>({0.5f, 0.5f});
+    test_case.add_input<float>({4.f, 6.f});
+    test_case.add_expected_output<float>(Shape{1, 1, 1, 2}, {2.5f, 3.75f});
+    test_case.add_expected_output<float>(Shape{1, 1, 2, 2}, {3.f, 4.5f, 2.5f, 3.75f});
+    test_case.run();
+}
+
+OPENVINO_TEST(${BACKEND_NAME}, onnx_recurrent_gdn_rejects_invalid_contract) {
+    EXPECT_THROW(convert_model("recurrent_gdn_bad_rank.onnx"), ov::Exception);
+    EXPECT_THROW(convert_model("recurrent_gdn_bad_type.onnx"), ov::Exception);
+}
+
 OPENVINO_TEST(${BACKEND_NAME}, onnx_prior_box) {
     const auto model = convert_model("prior_box.onnx");
     auto test_case = ov::test::TestCase(model, s_device);
